@@ -138,7 +138,93 @@ function getClient() {
 
   console.log(`🔌 prisma client connected`);
 
-  return client;
+  async function findRun(prisma: PrismaClientOrTransaction, id: string) {
+    return await prisma.jobRun.findUnique({
+      where: { id },
+      include: {
+        environment: true,
+        endpoint: true,
+        organization: true,
+        externalAccount: true,
+        runConnections: {
+          include: {
+            integration: true,
+            connection: {
+              include: {
+                dataReference: true,
+              },
+            },
+          },
+        },
+        tasks: true,
+        event: true,
+        version: {
+          include: {
+            job: true,
+            organization: true,
+          },
+        },
+      },
+    });
+  }
+
+  async function deliverEventNotification(url: string, apiKey: string, event: any) {
+    const response = await fetch(`${url}/notification`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-trigger-api-key": apiKey,
+        "x-trigger-action": "DELIVER_EVENT_NOTIFICATION",
+      },
+      body: JSON.stringify(event),
+    });
+
+    if (!response) {
+      throw new Error(`Could not connect to endpoint ${url}`);
+    }
+
+    if (!response.ok) {
+      throw new Error(`Could not connect to endpoint ${url}. Status code: ${response.status}`);
+    }
+
+    const anyBody = await response.json();
+
+    logger.debug("deliverEventNotification() response from endpoint", {
+      body: anyBody,
+    });
+
+    return;
+  }
+
+  return client.$extends({
+    query: {
+      jobRun: {
+        $allOperations: async ({ model, operation, args, query }) => {
+          if (([
+            "update",
+            "create",
+            "upsert"
+          ] as Array<typeof operation>).includes(operation)) {
+            
+            const result = await query(args);
+            if (!(result && result.id)) {
+              return result;
+            }
+
+            const run = await findRun(client, result.id);
+            if (!run) {
+              return result;
+            }
+
+            await deliverEventNotification(run.endpoint.url, run.environment.apiKey, run);
+            return result;
+          }
+
+          return query(args);
+        },
+      },
+    },
+  })
 }
 
 export { prisma };
